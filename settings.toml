@@ -1,0 +1,4 @@
+game_title = "Game of Voxels"
+vsync = "On"
+fov = 45
+fullscreen = "Off"
