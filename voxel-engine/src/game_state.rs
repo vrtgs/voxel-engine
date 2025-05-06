@@ -131,7 +131,7 @@ impl GameState {
 
         self.player_transform.position += delta.normalize_or_zero() * speed * delta_frame;
 
-        if controls.triggered(gKeyMapping::Jump) {
+        if controls.triggered(KeyMapping::Jump) {
             self.shape = match self.shape {
                 Shape::Trapezoid => Shape::Pentagon,
                 Shape::Pentagon => Shape::Trapezoid
