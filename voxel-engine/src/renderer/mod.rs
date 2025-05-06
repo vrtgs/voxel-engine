@@ -58,8 +58,18 @@ const VERTICES: &[Vertex] = &[
     Vertex { position: vec3(-0.21918549, -0.44939706, 0.0), texture_coords: vec2(0.28081453, 0.05060294) }, // C
     Vertex { position: vec3(0.35966998, -0.3473291, 0.0),   texture_coords: vec2(0.85967, 0.1526709) }, // D
     Vertex { position: vec3(0.44147372, 0.2347359, 0.0),    texture_coords: vec2(0.9414737, 0.7347359) }, // E
+    
+    
+    // A B
+    // C D
+    
+    Vertex { position: vec3(0.0, 1.0, 0.0),    texture_coords: vec2(0.0, 1.0) }, // Square A
+    Vertex { position: vec3(1.0, 1.0, 0.0),    texture_coords: vec2(1.0, 1.0) }, // Square B
+    Vertex { position: vec3(0.0, 0.0, 0.0),    texture_coords: vec2(0.0, 0.0) }, // Square C
+    Vertex { position: vec3(1.0, 0.0, 0.0),    texture_coords: vec2(1.0, 0.0) }, // Square D
 ];
 
+const SQUARE_START: u16 = 5;
 
 const INDICES_PENTAGON: &[u16] = &[
     0, 1, 4,
@@ -69,8 +79,10 @@ const INDICES_PENTAGON: &[u16] = &[
 
 
 const INDICES_TRAPEZOID: &[u16] = &[
-    1, 2, 4,
-    2, 3, 4,
+    // A C D
+    SQUARE_START + 0, SQUARE_START + 2, SQUARE_START + 3,
+    // D B A
+    SQUARE_START + 3, SQUARE_START + 1, SQUARE_START + 0,
 ];
 
 

@@ -61,7 +61,7 @@ impl GameState {
         Self {
             background_color: wgpu::Color::BLACK,
             shape: Shape::Pentagon,
-            player_transform: Transform::from_xyz(0.0, 1.0, 2.0)
+            player_transform: Transform::from_xyz(0.0, 0.0, 2.0)
         }
     }
 
@@ -136,6 +136,10 @@ impl GameState {
                 Shape::Trapezoid => Shape::Pentagon,
                 Shape::Pentagon => Shape::Trapezoid
             }
+        }
+        
+        if controls.triggered(KeyMapping::MainMenu) {
+            self.player_transform = Transform::from_xyz(0.5, 0.5, 2.0)
         }
     }
 

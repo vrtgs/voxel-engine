@@ -6,7 +6,7 @@ use winit::{
     window::{Fullscreen, Window, WindowId},
 };
 use winit::event::{DeviceEvent, DeviceId, KeyEvent, RawKeyEvent};
-use winit::window::Cursor;
+use winit::window::{Cursor, CursorGrabMode};
 use crate::controls::Controls;
 use crate::game_state::GameState;
 use crate::renderer::Renderer;
@@ -50,6 +50,7 @@ impl ApplicationHandler for App {
         let state = pollster::block_on(Renderer::new(Arc::clone(&window), settings));
         
         window.set_cursor_visible(false);
+        window.set_cursor_grab(CursorGrabMode::Locked).unwrap();
         
         self.render_state = Some(state);
         window.request_redraw();
