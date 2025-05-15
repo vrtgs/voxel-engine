@@ -26,7 +26,7 @@ impl Fov {
     
     #[inline]
     pub const fn new(fov: u8) -> Option<Self> {
-        if fov < Self::MIN.get() || fov > Self::MAX.get() { 
+        if fov < Self::MIN.get_degrees() || fov > Self::MAX.get_degrees() { 
             return None;
         }
         
@@ -41,7 +41,7 @@ impl Fov {
         }
     }
     
-    pub const fn get(&self) -> u8 {
+    pub const fn get_degrees(&self) -> u8 {
         self.0.get()
     }
 }
@@ -51,7 +51,7 @@ impl Serialize for Fov {
     where
         S: Serializer,
     {
-        Serialize::serialize(&self.get(), serializer)
+        Serialize::serialize(&self.get_degrees(), serializer)
     }
 }
 

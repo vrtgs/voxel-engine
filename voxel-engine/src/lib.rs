@@ -5,8 +5,9 @@ use winit::{
     event_loop::{ActiveEventLoop, ControlFlow, EventLoop},
     window::{Fullscreen, Window, WindowId},
 };
+use winit::error::ExternalError;
 use winit::event::{DeviceEvent, DeviceId, KeyEvent, RawKeyEvent};
-use winit::window::{Cursor, CursorGrabMode};
+use winit::window::CursorGrabMode;
 use crate::controls::Controls;
 use crate::game_state::GameState;
 use crate::renderer::Renderer;
@@ -20,9 +21,37 @@ mod game_state;
 
 mod controls;
 
+pub(crate) fn attempt_lock_cursor(
+    window: &Window,
+    grab: bool,
+) -> Result<(), ExternalError> {
+    window.set_cursor_visible(!grab);
+    
+    let grab_result = match grab {
+        false => window.set_cursor_grab(CursorGrabMode::None),
+        true => window
+            .set_cursor_grab(CursorGrabMode::Locked)
+            .or_else(|_e| window.set_cursor_grab(CursorGrabMode::Confined)),
+    };
+    
+    if let Err(err) = grab_result {
+        let err_desc = match grab {
+            true => "grab",
+            false => "ungrab",
+        };
+
+        tracing::error!("Unable to {} cursor: {}", err_desc, err);
+        return Err(err)
+    }
+    
+    Ok(())
+}
+
+
 struct App {
     controls: Controls,
     game_state: GameState,
+    cursor_locked: bool,
     render_state: Option<Renderer>,
 }
 
@@ -49,10 +78,9 @@ impl ApplicationHandler for App {
         let window = Arc::new(window);
         let state = pollster::block_on(Renderer::new(Arc::clone(&window), settings));
         
-        window.set_cursor_visible(false);
-        window.set_cursor_grab(CursorGrabMode::Locked).unwrap();
-        
         self.render_state = Some(state);
+        let _ = attempt_lock_cursor(&window, self.cursor_locked);
+        
         window.request_redraw();
     }
 
@@ -61,6 +89,13 @@ impl ApplicationHandler for App {
         assert_eq!(state.window().id(), id);
         
         match event {
+            WindowEvent::Focused(focus) => {
+                self.cursor_locked = focus;
+                let _ = attempt_lock_cursor(state.window(), focus);
+                if !focus { 
+                    self.controls.lost_focus();
+                }
+            }
             WindowEvent::KeyboardInput { event: KeyEvent {
                 physical_key,
                 state,
@@ -104,6 +139,7 @@ fn run_app() {
     let mut app = App {
         controls: Controls::default(),
         game_state: GameState::new(),
+        cursor_locked: true,
         render_state: None,
     };
     event_loop.run_app(&mut app).unwrap();

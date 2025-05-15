@@ -5,6 +5,7 @@
       <sourceFolder url="file://$MODULE_DIR$/src" isTestSource="false" />
       <sourceFolder url="file://$MODULE_DIR$/voxel-engine/src" isTestSource="false" />
       <sourceFolder url="file://$MODULE_DIR$/voxel-runtime/src" isTestSource="false" />
+      <sourceFolder url="file://$MODULE_DIR$/voxel-maths/src" isTestSource="false" />
       <excludeFolder url="file://$MODULE_DIR$/target" />
     </content>
     <orderEntry type="inheritedJdk" />

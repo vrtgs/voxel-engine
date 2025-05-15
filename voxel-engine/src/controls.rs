@@ -6,7 +6,7 @@ use glam::{vec2, Vec2};
 use winit::event::{DeviceEvent, ElementState, MouseButton, RawKeyEvent};
 use winit::keyboard::{KeyCode, PhysicalKey};
 
-trait Button: Copy + Send + Sync + Hash + Eq + 'static  {}
+pub trait Button: Copy + Send + Sync + Hash + Eq + 'static  {}
 
 impl<T: Copy + Send + Sync + Hash + Eq + 'static> Button for T {}
 
@@ -367,8 +367,10 @@ impl Controls {
         self.mkb.mouse.accumulated = Vec2::ZERO
     }
 
-    pub fn release(&mut self) {
-        self.mkb.keys.inputs.release_all()
+    pub fn lost_focus(&mut self) {
+        let input = &mut self.mkb.keys.inputs;
+        input.reset_all();
+        input.release_all()
     }
 
     fn update_mkb_buttons(&mut self, code: MouseAndKeyboardButton, state: ElementState) {

@@ -1,7 +1,6 @@
 use std::sync::Arc;
 use tokio::sync::Notify;
 
-
 #[derive(Debug)]
 pub struct Unparker(Arc<Notify>);
 

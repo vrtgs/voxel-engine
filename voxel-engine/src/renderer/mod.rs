@@ -1,18 +1,41 @@
 use std::num::NonZero;
 use std::sync::Arc;
 use bytemuck::{Pod, Zeroable};
-use glam::{vec2, vec3, Mat4, Vec2, Vec3};
-use wgpu::{Instance as WGPUInstance, Device, DeviceDescriptor, MemoryHints, PowerPreference, Queue, RequestAdapterOptions, Surface, TextureFormat, Trace, InstanceDescriptor, SurfaceConfiguration, TextureUsages, CompositeAlphaMode, PresentMode, TextureViewDescriptor, Operations, RenderPassColorAttachment, LoadOp, StoreOp, RenderPassDescriptor, BufferAddress, BufferUsages, BindGroup};
+use glam::{vec3a, Mat4, Quat, Vec3, Vec3A};
+use wgpu::{Instance as WGPUInstance, Device, DeviceDescriptor, MemoryHints, PowerPreference, Queue, RequestAdapterOptions, Surface, TextureFormat, Trace, InstanceDescriptor, SurfaceConfiguration, TextureUsages, CompositeAlphaMode, PresentMode, TextureViewDescriptor, Operations, RenderPassColorAttachment, LoadOp, StoreOp, RenderPassDescriptor, BufferAddress, BufferUsages, BindGroup, CommandEncoder, VertexBufferLayout};
+use wgpu::util::StagingBelt;
 use winit::window::Window;
-use crate::game_state::{GameState, Shape};
+use voxel_maths::Transform;
+use crate::game_state::GameState;
 use crate::renderer::buffer::Buffer;
-use crate::renderer::camera::Camera;
-use crate::renderer::texture::include_texture;
+use crate::renderer::camera::{Camera, Projection};
+use crate::renderer::model::{DrawObjExt, Model, ModelVertex, VertexComponent};
+use crate::renderer::texture::Texture;
 use crate::settings::{GameSettings, GameSettingsHandle, Vsync};
 
 mod texture;
 mod buffer;
 mod camera;
+
+pub mod model;
+
+const fn buffer_size_of<T>() -> BufferAddress {
+    const {
+        let addr = size_of::<T>();
+        if addr as BufferAddress as usize != addr {
+            panic!("invalid size of buffer, struct too large to fit in GPU memory")
+        }
+        
+        addr as BufferAddress
+    }
+}
+
+macro_rules! buffer_size_of {
+    ($t:ty) => {
+        const { buffer_size_of::<$t>() }
+    };
+}
+
 
 pub(super) struct Renderer {
     window: Arc<Window>,
@@ -20,86 +43,86 @@ pub(super) struct Renderer {
     device: Device,
     queue: Queue,
     size: winit::dpi::PhysicalSize<u32>,
-    camera: Camera,
     surface: Surface<'static>,
     surface_format: TextureFormat,
     render_pipeline: wgpu::RenderPipeline,
-    vertex_buffer: Buffer<Vertex>,
-    pentagon_index_buffer: Buffer<u16>,
-    trapezoid_index_buffer: Buffer<u16>,
-    pentagon_bind_group: BindGroup,
-    trapezoid_bind_group: BindGroup,
-    camera_uniform: CameraUniform,
+    staging_belt: StagingBelt,
+    projection: Projection,
+    last_camera_uniform: CameraUniform,
     camera_buffer: Buffer<CameraUniform>,
     camera_bind_group: BindGroup,
+    depth_texture: Texture,
+    
+    model: Model,
+    instance_buffer: Buffer<InstanceRaw>
 }
 
-#[derive(Debug, Copy, Clone, Pod, Zeroable)]
-#[repr(C)]
-struct Vertex {
-    position: Vec3,
-    texture_coords: Vec2,
-}
+#[derive(Copy, Clone)]
+struct Instance(Transform);
 
-
-impl Vertex {
-    fn desc() -> wgpu::VertexBufferLayout<'static> {
-        wgpu::VertexBufferLayout {
-            array_stride: size_of::<Vertex>() as BufferAddress,
-            step_mode: wgpu::VertexStepMode::Vertex,
-            attributes: &const { wgpu::vertex_attr_array![0 => Float32x3, 1 => Float32x2] },
-        }
+impl Instance {
+    fn to_raw(self) -> InstanceRaw {
+        InstanceRaw(Mat4::from_rotation_translation(
+            self.0.rotation,
+            self.0.position.into()
+        ))
     }
 }
 
-const VERTICES: &[Vertex] = &[
-    Vertex { position: vec3(-0.0868241, 0.49240386, 0.0),   texture_coords: vec2(0.4131759, 0.99240386) }, // A
-    Vertex { position: vec3(-0.49513406, 0.06958647, 0.0),  texture_coords: vec2(0.0048659444, 0.56958647) }, // B
-    Vertex { position: vec3(-0.21918549, -0.44939706, 0.0), texture_coords: vec2(0.28081453, 0.05060294) }, // C
-    Vertex { position: vec3(0.35966998, -0.3473291, 0.0),   texture_coords: vec2(0.85967, 0.1526709) }, // D
-    Vertex { position: vec3(0.44147372, 0.2347359, 0.0),    texture_coords: vec2(0.9414737, 0.7347359) }, // E
-    
-    
-    // A B
-    // C D
-    
-    Vertex { position: vec3(0.0, 1.0, 0.0),    texture_coords: vec2(0.0, 1.0) }, // Square A
-    Vertex { position: vec3(1.0, 1.0, 0.0),    texture_coords: vec2(1.0, 1.0) }, // Square B
-    Vertex { position: vec3(0.0, 0.0, 0.0),    texture_coords: vec2(0.0, 0.0) }, // Square C
-    Vertex { position: vec3(1.0, 0.0, 0.0),    texture_coords: vec2(1.0, 0.0) }, // Square D
-];
 
-const SQUARE_START: u16 = 5;
+#[derive(Copy, Clone, Pod, Zeroable)]
+#[repr(transparent)]
+struct InstanceRaw(Mat4);
 
-const INDICES_PENTAGON: &[u16] = &[
-    0, 1, 4,
-    1, 2, 4,
-    2, 3, 4,
-];
+impl VertexComponent for InstanceRaw {
+    const DESC: VertexBufferLayout<'static> = VertexBufferLayout {
+        array_stride: buffer_size_of!(InstanceRaw),
+        // We need to switch from using a step mode of Vertex to Instance
+        // This means that our shaders will only change to use the next
+        // instance when the shader starts processing a new instance
+        step_mode: wgpu::VertexStepMode::Instance,
+        attributes: &[
+            // A mat4 takes up 4 vertex slots as it is technically 4 vec4s. We need to define a slot
+            // for each vec4. We'll have to reassemble the mat4 in the shader.
+            wgpu::VertexAttribute {
+                offset: 0,
+                // While our vertex shader only uses locations 0, and 1 now, in later tutorials, we'll
+                // be using 2, 3, and 4, for Vertex. We'll start at slot 5, not conflict with them later
+                shader_location: 5,
+                format: wgpu::VertexFormat::Float32x4,
+            },
+            wgpu::VertexAttribute {
+                offset: buffer_size_of!([f32; 4]),
+                shader_location: 6,
+                format: wgpu::VertexFormat::Float32x4,
+            },
+            wgpu::VertexAttribute {
+                offset: buffer_size_of!([f32; 8]),
+                shader_location: 7,
+                format: wgpu::VertexFormat::Float32x4,
+            },
+            wgpu::VertexAttribute {
+                offset: buffer_size_of!([f32; 12]),
+                shader_location: 8,
+                format: wgpu::VertexFormat::Float32x4,
+            },
+        ],
+    };
+}
 
 
-const INDICES_TRAPEZOID: &[u16] = &[
-    // A C D
-    SQUARE_START + 0, SQUARE_START + 2, SQUARE_START + 3,
-    // D B A
-    SQUARE_START + 3, SQUARE_START + 1, SQUARE_START + 0,
-];
-
-
-#[derive(Debug, Copy, Clone, Pod, Zeroable)]
-#[repr(C)]
+#[derive(Copy, Clone, Pod, Zeroable, PartialEq)]
+#[repr(transparent)]
 struct CameraUniform {
     view_proj: Mat4
 }
 
 impl CameraUniform {
-    pub fn from_camera(camera: &Camera) -> Self {
-        Self {
-            view_proj: camera.build_view_projection_matrix()
-        }
+    fn new(camera: &Camera, projection: &Projection) -> Self {
+        let view_proj = projection.calc_matrix() * camera.calc_matrix();
+        Self { view_proj }
     }
 }
-
 
 
 impl Renderer {
@@ -140,19 +163,17 @@ impl Renderer {
         let size = window.inner_size();
 
         let loaded_settings = settings.load();
-        let camera = Camera::new(
-            Vec3::ZERO,
-            Vec3::ZERO,
-            size,
+        let projection = Projection::new(
+            size.width,
+            size.height,
             loaded_settings.fov
         );
         let config = Self::make_config_with_settings(&loaded_settings, size, surface_format);
         drop(loaded_settings);
         surface.configure(&device, &config);
-
-        let pentagon_texture = include_texture!(device, queue, "../../assets/blocks/tree.png");
-        let trapezoid_texture = include_texture!(device, queue, "../../assets/icon/voxel-engine.png");
-
+        
+        let depth_texture = Texture::create_depth_texture(&device, &config, "depth texture");
+        
         let texture_bind_group_layout =
             device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
                 entries: &[
@@ -177,44 +198,11 @@ impl Renderer {
                 ],
                 label: Some("texture_bind_group_layout"),
             });
-
-        let pentagon_bind_group = device.create_bind_group(
-            &wgpu::BindGroupDescriptor {
-                layout: &texture_bind_group_layout,
-                entries: &[
-                    wgpu::BindGroupEntry {
-                        binding: 0,
-                        resource: wgpu::BindingResource::TextureView(&pentagon_texture .view),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 1,
-                        resource: wgpu::BindingResource::Sampler(&pentagon_texture .sampler),
-                    }
-                ],
-                label: Some("pentagon_bind_group"),
-            }
-        );
-
-        let trapezoid_bind_group = device.create_bind_group(
-            &wgpu::BindGroupDescriptor {
-                layout: &texture_bind_group_layout,
-                entries: &[
-                    wgpu::BindGroupEntry {
-                        binding: 0,
-                        resource: wgpu::BindingResource::TextureView(&trapezoid_texture.view),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 1,
-                        resource: wgpu::BindingResource::Sampler(&trapezoid_texture.sampler),
-                    }
-                ],
-                label: Some("pentagon_bind_group"),
-            }
-        );
-
         
-        let camera_uniform = CameraUniform::from_camera(&camera);
-        let camera_buffer = Buffer::new(
+        let camera_uniform = CameraUniform {
+            view_proj: Mat4::ZERO
+        };
+        let camera_buffer = Buffer::with_init(
             &device,
             &[camera_uniform],
             BufferUsages::UNIFORM | BufferUsages::COPY_DST,
@@ -267,7 +255,7 @@ impl Renderer {
             vertex: wgpu::VertexState {
                 module: &shader,
                 entry_point: Some("vs_main"), // 1.
-                buffers: &[Vertex::desc()], // 2.
+                buffers: &[ModelVertex::DESC, InstanceRaw::DESC], // 2.
                 compilation_options: wgpu::PipelineCompilationOptions::default(),
             },
             fragment: Some(wgpu::FragmentState { // 3.
@@ -292,7 +280,13 @@ impl Renderer {
                 // Requires Features::CONSERVATIVE_RASTERIZATION
                 conservative: false,
             },
-            depth_stencil: None, // 1. `fake depth`
+            depth_stencil: Some(wgpu::DepthStencilState {
+                format: Texture::DEPTH_FORMAT,
+                depth_write_enabled: true,
+                depth_compare: wgpu::CompareFunction::Less,
+                stencil: wgpu::StencilState::default(),
+                bias: wgpu::DepthBiasState::default()
+            }), 
             multisample: wgpu::MultisampleState {
                 count: 1, // 2. We dont currently need multi sampling
                 mask: !0, // 3. using all samples
@@ -302,47 +296,67 @@ impl Renderer {
             cache: None, // 6. allows wgpu to cache shader compilation data. Only really useful for Android build targets.
         });
 
+        
+        const STAGING_BELT_SIZE: BufferAddress = 64 * 1024 * 1024; // 64 Mib
 
-        let vertex_buffer = Buffer::new(
+
+        const NUM_INSTANCES_PER_ROW: u32 = 10;
+
+        const SPACE_BETWEEN: f32 = 3.0;
+        let instances = (0..NUM_INSTANCES_PER_ROW).flat_map(|z| {
+            (0..NUM_INSTANCES_PER_ROW).map(move |x| {
+                let x = SPACE_BETWEEN * (x as f32 - NUM_INSTANCES_PER_ROW as f32 / 2.0);
+                let z = SPACE_BETWEEN * (z as f32 - NUM_INSTANCES_PER_ROW as f32 / 2.0);
+
+                let position = vec3a(x, 0.0, z);
+
+                let rotation = if position.cmpeq(Vec3A::ZERO).all() {
+                    Quat::from_axis_angle(Vec3::Z, 0.0)
+                } else {
+                    Quat::from_axis_angle(position.normalize().into(), 45.0_f32.to_radians())
+                };
+
+                Instance(Transform {
+                    position,
+                    rotation
+                })
+            })
+        }).collect::<Vec<_>>();
+
+
+        let instance_buffer = Buffer::with_init(
             &device,
-            VERTICES,
+            // TODO: get rid of collect and collect directly into buffer
+            &instances.iter().map(|instance: &Instance| instance.to_raw()).collect::<Vec<_>>(),
             BufferUsages::VERTEX,
-            Some("vertex buffer")
+            Some("instance buffer")
         );
 
-        let pentagon_index_buffer = Buffer::new(
+        let model = Model::load(
+            "./voxel-engine/assets/cube/cube.obj",
             &device,
-            INDICES_PENTAGON,
-            BufferUsages::INDEX,
-            Some("pentagon index buffer")
-        );
-
-        let trapezoid_index_buffer = Buffer::new(
-            &device,
-            INDICES_TRAPEZOID,
-            BufferUsages::INDEX,
-            Some("trapezoid index buffer")
-        );
-
-
+            &queue,
+            &texture_bind_group_layout
+        ).unwrap();
+        
         Renderer {
             settings,
             window,
             device,
             queue,
             size,
-            camera,
             surface,
             surface_format,
             render_pipeline,
-            vertex_buffer,
-            pentagon_index_buffer,
-            trapezoid_index_buffer,
-            pentagon_bind_group,
-            trapezoid_bind_group,
-            camera_uniform,
+            staging_belt: StagingBelt::new(STAGING_BELT_SIZE),
+            projection,
+            last_camera_uniform: camera_uniform,
             camera_buffer,
-            camera_bind_group
+            camera_bind_group,
+            depth_texture,
+            
+            model,
+            instance_buffer,
         }
     }
 
@@ -372,37 +386,36 @@ impl Renderer {
         tracing::info!("new surface {:#?}", surface_config);
         surface_config
     }
-
-    fn configure_surface(&mut self, settings: &GameSettings) {
-        let cfg = Self::make_config_with_settings(settings, self.size, self.surface_format);
-        self.surface.configure(&self.device, &cfg);
-    }
-
     
-    fn reload_camera(&mut self) {
-        let new_uniform = self.camera.build_view_projection_matrix();
+    fn render_camera(&mut self, camera: Camera, encoder: &mut CommandEncoder) {
+        let new_uniform = CameraUniform::new(
+            &camera,
+            &self.projection
+        );
 
-        if new_uniform != self.camera_uniform.view_proj {
-            self.camera_uniform.view_proj = new_uniform;
-            self.camera_buffer.write(&self.queue, &[self.camera_uniform])
+        if new_uniform != self.last_camera_uniform {
+            self.last_camera_uniform = new_uniform;
+            self.camera_buffer.write(
+                &mut self.staging_belt,
+                encoder,
+                &self.device,
+                std::slice::from_ref(&new_uniform)
+            );
         }
     }
-
-    fn reload(&mut self) {
+    
+    pub fn reconfigure(&mut self) {
         let settings = self.settings.load();
-        self.configure_surface(&settings);
-        self.camera = Camera::new(
-            self.camera.eye,
-            self.camera.target,
-            self.size,
-            settings.fov
-        );
-        self.reload_camera()
+        let config = Self::make_config_with_settings(&settings, self.size, self.surface_format);
+        self.surface.configure(&self.device, &config);
+        self.depth_texture = Texture::create_depth_texture(&self.device, &config, "depth texture");
+        self.projection.resize(self.size.width, self.size.height);
+        self.projection.change_fov(settings.fov);
     }
 
     pub fn resize(&mut self, new_size: winit::dpi::PhysicalSize<u32>) {
         self.size = new_size;
-        self.reload();
+        self.reconfigure();
     }
 
     pub fn render(&mut self, game: &GameState) {
@@ -420,11 +433,11 @@ impl Renderer {
                 ..Default::default()
             });
 
-        let mut encoder = self.device.create_command_encoder(&Default::default());
         
+        let camera = Camera::new(game.player());
         
-        self.camera.update_from_player(game.transform());
-        self.reload_camera();
+        let mut encoder = self.device.create_command_encoder(&Default::default());       
+        self.render_camera(camera, &mut encoder);
         
         {
             // we need the render pass to drop before we can move out of encoder
@@ -438,28 +451,29 @@ impl Renderer {
                         store: StoreOp::Store,
                     },
                 })],
-                depth_stencil_attachment: None,
+                depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                    view: &self.depth_texture.view,
+                    depth_ops: Some(Operations {
+                        load: LoadOp::Clear(1.0),
+                        store: StoreOp::Store
+                    }),
+                    stencil_ops: None
+                }),
                 timestamp_writes: None,
                 occlusion_query_set: None,
             });
 
             render_pass.set_pipeline(&self.render_pipeline);
-
-            let (index_buffer, bind_group) = match game.shape() {
-                Shape::Pentagon => (&self.pentagon_index_buffer, &self.pentagon_bind_group),
-                Shape::Trapezoid => (&self.trapezoid_index_buffer, &self.trapezoid_bind_group)
-            };
-
-            render_pass.set_bind_group(0, bind_group, &[]);
             render_pass.set_bind_group(1, &self.camera_bind_group, &[]);
-
-            render_pass.set_vertex_buffer(0, self.vertex_buffer.slice(..));
-            render_pass.set_index_buffer(index_buffer.slice(..), wgpu::IndexFormat::Uint16);
-            render_pass.draw_indexed(0..index_buffer.len_u32(), 0, 0..1);
+            render_pass.set_vertex_buffer(1, self.instance_buffer.slice(..));
+            render_pass.draw_obj_instanced(&self.model, 0..self.instance_buffer.len_u32())
         }
 
         // Submit the command in the queue to execute
+        self.staging_belt.finish();
         self.queue.submit(std::iter::once(encoder.finish()));
+        self.staging_belt.recall();
+        
         self.window.pre_present_notify();
         surface_texture.present();
     }

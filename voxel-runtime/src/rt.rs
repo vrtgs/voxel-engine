@@ -1,11 +1,28 @@
+use std::convert::Infallible;
 use std::panic::AssertUnwindSafe;
 use std::pin::Pin;
 use std::sync::LazyLock;
 use std::task::{Context, Poll};
-use tokio::runtime::Runtime;
+use tokio::runtime::Handle; 
 use tokio::task::{JoinError, JoinHandle};
 
-static RUNTIME: LazyLock<Runtime> = LazyLock::new(|| Runtime::new().unwrap());
+static RUNTIME: LazyLock<Handle> = LazyLock::new(|| {
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        // blocking tasks handled by rayon
+        .max_blocking_threads(2)
+        .enable_all()
+        .build()
+        .unwrap();
+    
+    let handle = runtime.handle().clone();
+    
+    std::thread::Builder::new().name("tokio-runtime-handler".into()).spawn(move || -> Infallible {
+        // drive runtime I/o logic and run spawned tasks
+        runtime.block_on(std::future::pending::<Infallible>())
+    }).unwrap();
+    
+    handle
+});
 
 pub fn block_on<F: Future>(future: F) -> F::Output {
     RUNTIME.block_on(future)
@@ -53,27 +70,36 @@ impl<T> Future for JobHandle<T> {
     }
 }
 
-pub fn spawn<T: Send + 'static>(func: impl FnOnce() -> T + 'static + Send) -> JobHandle<T> {
-    JobHandle(RUNTIME.spawn_blocking(func))
-}
-
-
-pub fn spawn_long_lived<T: Send + 'static>(func: impl FnOnce() -> T + 'static + Send) -> JobHandle<T> {
+fn blocking_to_join_handle<T: Send + 'static>(func: impl FnOnce() -> T + 'static + Send) -> (impl FnOnce() + Send, JobHandle<T>) {
     let (send, rcv) = tokio::sync::oneshot::channel();
 
-    std::thread::spawn(move || {
+    let func = move || {
         let res = std::panic::catch_unwind(AssertUnwindSafe(func));
         // we don't care if there is no receiver
         let _ = send.send(res);
-    });
+    };
 
-    JobHandle(RUNTIME.spawn(async move {
+    let handle = JobHandle(RUNTIME.spawn(async move {
         match rcv.await {
             Ok(Ok(data)) => data,
             Ok(Err(payload)) => std::panic::resume_unwind(payload),
             Err(_) => unreachable!("thread panicked before starting up")
         }
-    }))
+    }));
+
+    (func, handle)
+}
+
+pub fn spawn<T: Send + 'static>(func: impl FnOnce() -> T + 'static + Send) -> JobHandle<T> {
+    let (task, handle) = blocking_to_join_handle(func);
+    rayon::spawn(task);
+    handle
+}
+
+pub fn spawn_long_lived<T: Send + 'static>(func: impl FnOnce() -> T + 'static + Send) -> JobHandle<T> {
+    let (task, handle) = blocking_to_join_handle(func);
+    std::thread::spawn(task);
+    handle
 }
 
 pub fn spawn_async<F>(future: F) -> JobHandle<F::Output>
