@@ -217,7 +217,8 @@ pub fn load() -> GameSettingsHandle {
             
             let handle = GameSettingsHandle(settings_handle.upgrade()?);
             let current = handle.load();
-            let changed = (*current) != *prev;
+            let changed = (!Arc::ptr_eq(&current.guard, &prev))
+                || (*current) != *prev;
 
             if last_save_err || changed {
                 match changed {

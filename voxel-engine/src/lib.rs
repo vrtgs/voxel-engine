@@ -52,7 +52,7 @@ struct App {
     controls: Controls,
     game_state: GameState,
     cursor_locked: bool,
-    render_state: Option<Renderer>,
+    renderer: Option<Renderer>,
 }
 
 impl ApplicationHandler for App {
@@ -76,23 +76,23 @@ impl ApplicationHandler for App {
             .unwrap();
 
         let window = Arc::new(window);
-        let state = pollster::block_on(Renderer::new(Arc::clone(&window), settings));
+        let state = voxel_runtime::block_on(Renderer::new(Arc::clone(&window), settings));
         
-        self.render_state = Some(state);
+        self.renderer = Some(state);
         let _ = attempt_lock_cursor(&window, self.cursor_locked);
         
         window.request_redraw();
     }
 
     fn window_event(&mut self, event_loop: &ActiveEventLoop, id: WindowId, event: WindowEvent) {
-        let state = self.render_state.as_mut().unwrap();
-        assert_eq!(state.window().id(), id);
+        let renderer = self.renderer.as_mut().unwrap();
+        assert_eq!(renderer.window().id(), id);
         
         match event {
             WindowEvent::Focused(focus) => {
                 self.cursor_locked = focus;
-                let _ = attempt_lock_cursor(state.window(), focus);
-                if !focus { 
+                let _ = attempt_lock_cursor(renderer.window(), focus);
+                if !focus {
                     self.controls.lost_focus();
                 }
             }
@@ -109,15 +109,15 @@ impl ApplicationHandler for App {
             }
             WindowEvent::RedrawRequested => {
                 self.game_state.frame_update(&self.controls);
-                state.render(&self.game_state);
+                renderer.render(&self.game_state);
                 self.controls.new_frame();
-                state.window().request_redraw();
+                renderer.window().request_redraw();
 
             },
             WindowEvent::Resized(size) => {
                 // Reconfigures the size of the surface. We do not re-render
                 // here as this event is always followed up by a redrawn request.
-                state.resize(size);
+                renderer.resize(size);
             }
             _ => ()
         }
@@ -140,7 +140,7 @@ fn run_app() {
         controls: Controls::default(),
         game_state: GameState::new(),
         cursor_locked: true,
-        render_state: None,
+        renderer: None,
     };
     event_loop.run_app(&mut app).unwrap();
 }

@@ -162,11 +162,23 @@ pub trait DrawObjExt<T> {
 }
 
 
+pub trait DrawLightExt<T> {
+    fn draw_light_instanced(&mut self, obj: &T, range: Range<u32>);
+}
+
 impl DrawObjExt<(&Mesh, &Material)> for RenderPass<'_> {
     fn draw_obj_instanced(&mut self, &(mesh, material): &(&Mesh, &Material), range: Range<u32>) {
         self.set_vertex_buffer(0, mesh.vertex_buffer.slice(..));
-        
         self.set_bind_group(0, &material.bind_group, &[]);
+        self.set_index_buffer(mesh.index_buffer.slice(..), IndexFormat::Uint32);
+        self.draw_indexed(0..mesh.index_buffer.len_u32(), 0, range);
+    }
+}
+
+
+impl DrawLightExt<Mesh> for RenderPass<'_> {
+    fn draw_light_instanced(&mut self, mesh: &Mesh, range: Range<u32>) {
+        self.set_vertex_buffer(0, mesh.vertex_buffer.slice(..));
         self.set_index_buffer(mesh.index_buffer.slice(..), IndexFormat::Uint32);
         self.draw_indexed(0..mesh.index_buffer.len_u32(), 0, range);
     }
@@ -177,6 +189,14 @@ impl DrawObjExt<Model> for RenderPass<'_> {
         for mesh in &model.meshes {
             let material = &model.materials[mesh.material];
             self.draw_obj_instanced(&(mesh, material), range.clone())
+        }
+    }
+}
+
+impl DrawLightExt<Model> for RenderPass<'_> {
+    fn draw_light_instanced(&mut self, model: &Model, range: Range<u32>) {
+        for mesh in &model.meshes {
+            self.draw_light_instanced(mesh, range.clone())
         }
     }
 }

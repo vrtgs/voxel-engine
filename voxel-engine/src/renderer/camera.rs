@@ -9,6 +9,10 @@ impl<'a> Camera<'a> {
         Self(entity)
     }
 
+    pub fn eye(&self) -> Vec3 {
+        self.0.eye().xyz().as_f32()
+    }
+    
     pub fn calc_matrix(&self) -> Mat4 {
         let entity = self.0;
         let direction = entity.camera_direction().as_f32();

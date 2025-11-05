@@ -12,14 +12,12 @@ pub mod entity;
 pub mod coords;
 
 pub struct GameState {
-    background_color: wgpu::Color,
     player: Player,
 }
 
 impl GameState {
     pub fn new() -> Self {
         Self {
-            background_color: wgpu::Color::BLACK,
             player: Player {
                 camera: Camera {
                     yaw: 0.0,
@@ -29,11 +27,7 @@ impl GameState {
             } 
         }
     }
-
-    pub fn background_color(&self) -> wgpu::Color {
-        self.background_color
-    }
-
+    
     pub fn player(&self) -> &Player {
         &self.player
     }

@@ -99,7 +99,6 @@ impl<T> DerefMut for Buffer<T> {
     }
 }
 
-
 impl<T> Drop for Buffer<T> {
     fn drop(&mut self) {
         self.gpu_buffer.destroy()
