@@ -20,28 +20,38 @@ const FRACTIONAL_SCALE_F32: f32 = FRACTIONAL_SCALE as f32;
 
 impl Fract {
     pub const ZERO: Self = Self(0);
+    pub const MAX: Self = Self(u16::MAX);
+
     pub const HALF: Self = Self::recip(2);
     
     fn fmt_fractional<const RADIX: u32, const UPPERCASE: bool>(self, f: &mut Formatter) -> std::fmt::Result {
         const { assert!(2 <= RADIX && RADIX <= 16, "radix must be in range 2..=16") }
 
-        if self.0 == 0 {
-            return f.write_char('0');
-        }
-
         const DIGITS_LOWER: [char; 16] = {
+            #[inline(always)]
+            const fn select(condition: bool, true_val: u8, false_val: u8) -> u8 {
+                match condition {
+                    true => true_val,
+                    false => false_val
+                }
+            }
+
             let mut chars = ['\0'; 16];
             let mut i = 0;
             while i < 16 {
-                chars[i as usize] = match i {
-                    0..=9 => b'0' + i,
-                    10.. => b'a' + i - 10
-                } as char;
+                let base = select(
+                    i < 10,
+                    b'0',
+                    b'a' - 10
+                );
+                chars[i as usize] = (base + i) as char;
                 i += 1
             }
 
             chars
         };
+
+
         const DIGITS_UPPER: [char; 16] = {
             let mut chars = DIGITS_LOWER;
             let mut char_ptr = (&mut chars) as &mut [char];
@@ -54,19 +64,24 @@ impl Fract {
             chars
         };
 
-        let radix = RADIX;
+
+        let max_digits = f.precision();
+
+        if max_digits.is_none() && self.0 == 0 {
+            return f.write_char('0');
+        }
+
         let digits = match UPPERCASE {
             true => &DIGITS_UPPER,
             false => &DIGITS_LOWER
         };
 
-        let mut numerator = self.0 as u32 * radix;
-        let max_digits = f.precision();
-
+        let mut numerator = self.0 as u32 * RADIX;
         let mut digits_emitted = 0;
+
         while numerator != 0 && max_digits.is_none_or(|max| digits_emitted < max) {
             let (quotient, remainder) = (numerator / FRACTIONAL_SCALE, numerator % FRACTIONAL_SCALE);
-            numerator = remainder * radix;
+            numerator = remainder * RADIX;
 
             // its mathematically impossible to fail, but it isn't worth risking the unsafe code
             //
@@ -75,7 +90,6 @@ impl Fract {
             // (self * RADIX)/FRACTIONAL_SCALE < RADIX
 
             let digit_index = quotient as usize;
-
             let digit = digits[digit_index];
             f.write_char(digit)?;
 
@@ -90,8 +104,11 @@ impl Fract {
 
         Ok(())
     }
-    
+
+
     /// Computes the reciprocal
+    /// # Panics
+    /// when `x <= 1`
     pub const fn recip(x: u16) -> Self {
         // 1 / x * FRACTIONAL_SCALE
         assert!(x > 1, "reciprocal 1/1 and 1/0 are invalid");
@@ -105,7 +122,7 @@ impl Fract {
             "invalid fractional passed into `Fract::from_f32`"
         );
 
-        // this is saturating which is nice that we don't have to deal with it
+        // the cast is saturating which is nice that we don't have to deal with it
         Self((float * FRACTIONAL_SCALE_F32) as u16)
     }
 
@@ -151,8 +168,9 @@ impl Mul for Fract {
         // = fract(1) * fract(2) * SCALE
         // = expected
         
-        let result = ((self.0 as u32 * rhs.0 as u32) / FRACTIONAL_SCALE) as u16;
-        Self(result)
+        let result = (self.0 as u32 * rhs.0 as u32) / FRACTIONAL_SCALE;
+        debug_assert!(u16::try_from(result).is_ok());
+        Self(result as u16)
     }
 }
 
@@ -170,9 +188,12 @@ impl Div for Fract {
         // num(1) / num(2) * SCALE
         // = (fract(1) / fract(2)) * SCALE
         // = expected
-        
-        let result = (self.0/rhs.0) as i64 * FRACTIONAL_SCALE as i64;
-        FixedPoint(result)
+        // for better precision though do
+        // (fract(1) * SCALE) / fract(2)
+
+        let result = self.0 as u64 * const { FRACTIONAL_SCALE as u64 } / rhs.0 as u64;
+        debug_assert!(result.cast_signed() < i64::MAX);
+        FixedPoint(result.cast_signed())
     }
 }
 
@@ -204,6 +225,12 @@ impl FixedPoint {
     }
 
     #[inline(always)]
+    pub const fn is_positive(self) -> bool {
+        // in memory stored as [i48,fractional]
+        self.0 > 0
+    }
+
+    #[inline(always)]
     pub const fn from_raw(integer: i48, fractional: Fract) -> Self {
         let bits = (integer.to_bits() << 16) | fractional.0 as u64;
         Self(bits as i64)
@@ -227,7 +254,7 @@ impl FixedPoint {
     }
 
     pub const fn int(self) -> i48 {
-        unsafe { i48::from_bits_unchecked((self.0 as u64) >> 16) }
+        unsafe { i48::from_bits_unchecked((self.0.cast_unsigned()) >> 16) }
     }
 
     pub const fn fract(self) -> Fract {
@@ -290,6 +317,18 @@ impl SubAssign for FixedPoint {
     }
 }
 
+const fn clamp_computation(result: i128) -> FixedPoint {
+    if result > const { FixedPoint::MAX.0 as i128 } {
+        return FixedPoint::MAX
+    }
+
+    if result < const { FixedPoint::MIN.0 as i128 } {
+        return FixedPoint::MIN
+    }
+
+    FixedPoint(result as i64)
+}
+
 impl Mul for FixedPoint {
     type Output = FixedPoint;
 
@@ -300,16 +339,7 @@ impl Mul for FixedPoint {
         let x = self.0 as i128;
         let y = rhs.0 as i128;
         let result = (x * y) / FRACTIONAL_SCALE as i128;
-        
-        if result < FixedPoint::MIN.0 as i128 { 
-            return FixedPoint::MIN
-        }
-        
-        if result > FixedPoint::MAX.0 as i128 { 
-            return FixedPoint::MAX
-        }
-        
-        FixedPoint(result as i64)
+        clamp_computation(result)
     }
 }
 
@@ -327,11 +357,10 @@ impl Div for FixedPoint {
         // read on Frac::div
         // on why this works
         
-        let x = self.0;
-        let y = rhs.0;
-        let result = (x / y).saturating_mul(FRACTIONAL_SCALE as i64);
-        
-        FixedPoint(result)
+        let x = self.0 as i128;
+        let y = rhs.0 as i128;
+        let result = (x * const { FRACTIONAL_SCALE as i128 }) / y;
+        clamp_computation(result)
     }
 }
 
@@ -352,22 +381,22 @@ macro_rules! impl_cmp {
     ($ty: ty) => {
         impl $ty {
             #[inline(always)]
-            pub const fn const_lt(&self, other: Self) -> bool {
+            pub const fn const_lt(self, other: Self) -> bool {
                 self.0 < other.0
             }
             
             #[inline(always)]
-            pub const fn const_le(&self, other: Self) -> bool {
+            pub const fn const_le(self, other: Self) -> bool {
                 self.0 <= other.0
             }
             
             #[inline(always)]
-            pub const fn const_gt(&self, other: Self) -> bool {
+            pub const fn const_gt(self, other: Self) -> bool {
                 self.0 > other.0 
             }
             
             #[inline(always)]
-            pub const fn const_ge(&self, other: Self) -> bool {
+            pub const fn const_ge(self, other: Self) -> bool {
                 self.0 >= other.0
             }
         }
@@ -378,20 +407,24 @@ macro_rules! impl_cmp {
                 PartialOrd::partial_cmp(&self.0, &other.0)
             }
             
+            #[inline(always)]
             fn lt(&self, other: &Self) -> bool {
-                self.0 < other.0
+                (*self).const_lt(*other)
             }
             
+            #[inline(always)]
             fn le(&self, other: &Self) -> bool {
-                self.0 <= other.0
+                (*self).const_le(*other)
             }
             
+            #[inline(always)]
             fn gt(&self, other: &Self) -> bool {
-                self.0 > other.0 
+                (*self).const_gt(*other)
             }
             
+            #[inline(always)]
             fn ge(&self, other: &Self) -> bool {
-                self.0 >= other.0
+                (*self).const_ge(*other)
             }
         }
         
@@ -457,6 +490,7 @@ mod tests {
         assert_eq!(Fract(0).to_string(), "0.0");
         assert_eq!(FixedPoint::from_f32(1.5).to_string(), "1.5");
         assert_eq!(format!("{:.04}", FixedPoint::from_f32(1.5)), "1.5000");
+        assert_eq!(format!("{:.04}", FixedPoint::from_f32(1.0)), "1.0000");
     }
 
     #[test]
@@ -476,7 +510,7 @@ mod tests {
 
     #[test]
     fn test_fixed_float_roundtrip() {
-        let inputs = [-12345.678, -1.5, 0.0, 0.999, 42.125, 1e6];
+        let inputs = [-12345.678, -1.5, 0.0, 0.999, 42.125, 1e6, 40.33];
         for &val in &inputs {
             let ff = FixedPoint::from_f32(val);
             let out = ff.as_f32();
@@ -505,13 +539,5 @@ mod tests {
         let (int_out, frac_out) = ff.to_raw();
         assert_eq!(integer, int_out);
         assert_eq!(fractional, frac_out);
-    }
-
-    #[test]
-    fn test_fixed_float_is_negative() {
-        let neg = FixedPoint::from_f32(-10.25);
-        let pos = FixedPoint::from_f32(3.75);
-        assert!(neg.is_negative());
-        assert!(!pos.is_negative());
     }
 }
